@@ -285,7 +285,7 @@ app.use(helmet({
         ...EXTERNAL_CMP_CDN_SOURCES,
         ...LEGAL_EMBED_CSP_SOURCES,
       ],
-      imgSrc: ["'self'", "data:", "https:", "http:"],
+      imgSrc: ["'self'", "data:", "blob:", "https:", "http:"],
       connectSrc: IS_PRODUCTION
         ? [
             "'self'", "http://localhost:*", "https://localhost:*",
@@ -315,7 +315,7 @@ app.use(helmet({
           ],
       fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
       objectSrc: ["'none'"],
-      mediaSrc: ["'self'"],
+      mediaSrc: ["'self'", "blob:", "data:", "https:", "http:"],
       frameSrc: [
         "'self'",
         "https://www.instagram.com",

@@ -183,10 +183,11 @@ describe('API Endpoints', () => {
     expect(csp).not.toContain('upgrade-insecure-requests');
   });
 
-  it('CSP contains media-src self for local video/image uploads', async () => {
+  it('CSP contains media-src and img-src blob: for client-side previews and uploads', async () => {
     const response = await request(app).get('/health');
     const csp = response.headers['content-security-policy'];
-    expect(csp).toContain("media-src 'self'");
+    expect(csp).toContain("media-src 'self' blob:");
+    expect(csp).toContain("img-src 'self' data: blob:");
   });
 
   it('GET /api/auth/setup-status should return setup status', async () => {

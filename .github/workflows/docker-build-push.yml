@@ -1,0 +1,163 @@
+name: Build and Push (Multi-Arch ECR)
+
+on:
+  push:
+    branches: [ "main", "0904-proxy-content-uploads" ]
+  pull_request:
+    branches: [ "main" ]
+    types: [ closed ]
+  workflow_dispatch:
+
+env:
+  VERSION: "4.20.0"
+  FINAL_TAG: "latest"
+  IMAGE_TAG_BASE: "app-4.20.0-build${{ github.run_number }}"
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY || 'public.ecr.aws/m0d1e8s8' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'vze22jjw/orbitpage' }}
+
+jobs:
+  # -----------------------------------------------------------------
+  # JOB 1: AMD64 (Critical - Must Succeed)
+  # -----------------------------------------------------------------
+  build-amd64:
+    name: Build AMD64 (Stable)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Create Config
+        run: |
+          mkdir -p docker-builds
+          echo "AWS_REGION=us-east-1" > docker-builds/.env-build
+          echo "ECR_REGISTRY=${{ env.ECR_REGISTRY }}" >> docker-builds/.env-build
+          echo "ECR_REPOSITORY=${{ env.ECR_REPOSITORY }}" >> docker-builds/.env-build
+
+      - name: Build & Push
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          chmod +x docker-builds/docker-build-ci.sh
+          bash docker-builds/docker-build-ci.sh --build-type release --deploy --platform linux/amd64
+
+  # -----------------------------------------------------------------
+  # JOB 2: ARM64 (Optional - Allowed to Fail)
+  # -----------------------------------------------------------------
+  build-arm64:
+    name: Build ARM64 (Experimental)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Create Config
+        run: |
+          mkdir -p docker-builds
+          echo "AWS_REGION=us-east-1" > docker-builds/.env-build
+          echo "ECR_REGISTRY=${{ env.ECR_REGISTRY }}" >> docker-builds/.env-build
+          echo "ECR_REPOSITORY=${{ env.ECR_REPOSITORY }}" >> docker-builds/.env-build
+
+      - name: Build & Push (Retry Enabled)
+        id: build
+        uses: nick-fields/retry@v3
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        with:
+          timeout_minutes: 25
+          max_attempts: 2
+          shell: bash
+          command: |
+            chmod +x docker-builds/docker-build-ci.sh
+            bash docker-builds/docker-build-ci.sh --build-type release --deploy --platform linux/arm64
+
+  # -----------------------------------------------------------------
+  # JOB 3: Finalize (Multi-Arch Manifest & Tags)
+  # -----------------------------------------------------------------
+  finalize-deployment:
+    name: Finalize Tags
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    if: always() && needs.build-amd64.result == 'success'
+    
+    steps:
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        run: |
+          aws ecr-public get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Create and Push Multi-Arch Manifest
+        run: |
+          REPO="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}"
+          
+          AMD_REF="${REPO}:${{ env.IMAGE_TAG_BASE }}_linux-amd64"
+          ARM_REF="${REPO}:${{ env.IMAGE_TAG_BASE }}_linux-arm64"
+          
+          LATEST_TAG="${REPO}:${{ env.FINAL_TAG }}"
+          APP_LATEST_TAG="${REPO}:app-latest"
+          VERSIONED_TAG="${REPO}:app-v${{ env.VERSION }}-${{ github.run_number }}"
+
+          echo "Checking ARM64 status..."
+          
+          if [ "${{ needs.build-arm64.result }}" == "success" ]; then
+            echo "✅ ARM64 Build Succeeded! Creating Multi-Arch Manifest..."
+            docker buildx imagetools create \
+              -t $LATEST_TAG \
+              -t $APP_LATEST_TAG \
+              -t $VERSIONED_TAG \
+              $AMD_REF \
+              $ARM_REF
+          else
+            echo "⚠️ ARM64 Build Failed or Skipped. Fallback to AMD64 only."
+            docker buildx imagetools create \
+              -t $LATEST_TAG \
+              -t $APP_LATEST_TAG \
+              -t $VERSIONED_TAG \
+              $AMD_REF
+          fi
+
+      - name: Trigger Portainer Webhook
+        if: env.PORTAINER_WEBHOOK_URL != ''
+        env:
+          PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+        run: curl -X POST ${{ secrets.PORTAINER_WEBHOOK_URL }}
+
+      - name: Summary
+        run: |
+          echo "### 🚀 OrbitPage Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "ECR Image: \`${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.FINAL_TAG }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ needs.build-arm64.result == 'success' && 'Multi-Arch (AMD64 + ARM64)' || 'AMD64 Only (Fallback)' }}" >> $GITHUB_STEP_SUMMARY
