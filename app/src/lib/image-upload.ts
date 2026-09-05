@@ -53,9 +53,10 @@ function loadImage(file: File) {
   });
 }
 
-function outputName(filename: string, type: "image/avif" | "image/webp") {
+function outputName(filename: string, type: "image/avif" | "image/webp" | "image/jpeg" | "image/png") {
+  const ext = type === "image/avif" ? "avif" : type === "image/webp" ? "webp" : type === "image/jpeg" ? "jpg" : "png";
   const base = filename.replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "image";
-  return `${base.slice(0, 80)}.${type === "image/avif" ? "avif" : "webp"}`;
+  return `${base.slice(0, 80)}.${ext}`;
 }
 
 export async function optimizeImageForUpload(file: File, variant: ImageUploadVariant): Promise<File> {
@@ -93,12 +94,16 @@ export async function optimizeImageForUpload(file: File, variant: ImageUploadVar
       const context = canvas.getContext("2d");
       if (!context) throw new Error("This browser cannot optimize images.");
       context.drawImage(image, 0, 0, width, height);
-      for (const type of ["image/avif", "image/webp"] as const) {
+      for (const type of ["image/avif", "image/webp", "image/jpeg", "image/png"] as const) {
         const blob = await canvasBlob(canvas, type, attempt.quality);
         if (blob && blob.size <= limits.maxOutputBytes) {
-          return new File([blob], outputName(file.name, type), { type });
+          return new File([blob], outputName(file.name, type), { type: blob.type || type });
         }
       }
+    }
+
+    if (file.size <= limits.maxOutputBytes) {
+      return file;
     }
 
     throw new Error(`The optimized image is still too large. Use a simpler image under ${formatFileSize(limits.maxOutputBytes)}.`);
